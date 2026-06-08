@@ -55,8 +55,7 @@ export const $sidebarWidth: ReadableAtom<number> = computed($paneStates, states 
 export const $pinnedSessionIds = atom(storedStringArray(SIDEBAR_PINNED_STORAGE_KEY))
 export const $sidebarPinsOpen = atom(true)
 // Set by the PaneShell hover-reveal overlay while the collapsed sidebar is
-// floated over content. ChatSidebar treats `sidebarOpen || sidebarRevealed` as
-// "show my full self" so session rows render in the overlay too.
+// floated over content; ChatSidebar gates its rows on `sidebarOpen || this`.
 export const $sidebarRevealed = atom(false)
 export const $sidebarRecentsOpen = atom(true)
 // Cron-job sessions live in their own section below recents, collapsed by
@@ -121,9 +120,7 @@ export function setSidebarPinsOpen(open: boolean) {
 }
 
 export function setSidebarRevealed(revealed: boolean) {
-  if ($sidebarRevealed.get() !== revealed) {
-    $sidebarRevealed.set(revealed)
-  }
+  $sidebarRevealed.set(revealed)
 }
 
 export function setSidebarRecentsOpen(open: boolean) {

@@ -32,12 +32,7 @@ export interface PaneProps {
   defaultOpen?: boolean
   /** Forces the pane closed (track→0, aria-hidden) without writing to the store — for transient route gates. */
   disabled?: boolean
-  /**
-   * When the pane is collapsed, reveal its contents as a fixed overlay on hover
-   * (or keyboard focus) instead of leaving it fully hidden. The overlay floats
-   * over the main content — it does not reserve grid space, so the collapsed
-   * track stays at 0px.
-   */
+  /** When collapsed, float the contents over the main column on hover/focus instead of hiding them (track stays 0px). */
   hoverReveal?: boolean
   /** Called with the reveal state whenever a collapsed hoverReveal pane floats in/out. */
   onHoverRevealChange?: (revealed: boolean) => void
@@ -234,28 +229,23 @@ export function Pane({
   const side = slot?.side ?? 'left'
 
   // Collapsed + hoverReveal: float the pane contents over the main column on
-  // hover/focus instead of leaving them fully hidden. Honors any persisted
-  // resize width so the overlay matches the pane's expanded size.
+  // hover/focus instead of hiding them. Honors any persisted resize width.
   const overlayActive = !open && hoverReveal && !disabled
+  const override = resizable ? paneStates[id]?.widthOverride : undefined
+  const overlayWidth = override !== undefined ? `${override}px` : widthToCss(width, DEFAULT_WIDTH)
+  const revealed = overlayActive && hoverRevealed
 
-  const overlayWidth =
-    resizable && paneStates[id]?.widthOverride !== undefined
-      ? `${paneStates[id]?.widthOverride}px`
-      : widthToCss(width, DEFAULT_WIDTH)
-
-  // Collapse the reveal whenever the pane reopens or gets disabled so it never
-  // sticks "open" underneath the now-expanded track.
+  // Reset stale reveal state when the track reopens/disables, and surface the
+  // effective state so consumers can render full content while floated.
   useEffect(() => {
-    if (!overlayActive && hoverRevealed) {
+    if (!overlayActive) {
       setHoverRevealed(false)
     }
-  }, [overlayActive, hoverRevealed])
+  }, [overlayActive])
 
-  // Surface the effective reveal state to consumers (e.g. so the sidebar can
-  // render its full content while floated, not just while the track is open).
   useEffect(() => {
-    onHoverRevealChange?.(overlayActive && hoverRevealed)
-  }, [onHoverRevealChange, overlayActive, hoverRevealed])
+    onHoverRevealChange?.(revealed)
+  }, [onHoverRevealChange, revealed])
 
   const startResize = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -312,54 +302,44 @@ export function Pane({
     return null
   }
 
-  // Collapsed hover-reveal track: keep the grid cell at 0px (no reserved space)
-  // but don't clip — the trigger strip and the floating overlay both escape the
-  // zero-width box via absolute positioning, so the panel renders over the main
-  // content rather than pushing it.
+  // Collapsed hover-reveal track: grid cell stays 0px (no reserved space) but
+  // unclipped — the hot-zone and floating panel escape it via absolute
+  // positioning, rendering over the main content instead of pushing it.
   if (overlayActive) {
-    const revealEdge = slot.side === 'left' ? { left: 0 } : { right: 0 }
+    const left = slot.side === 'left'
 
     return (
       <div
         className={cn('pointer-events-none relative row-start-1 min-w-0', className)}
-        data-pane-hover-reveal={hoverRevealed ? 'open' : 'closed'}
+        data-pane-hover-reveal={revealed ? 'open' : 'closed'}
         data-pane-id={id}
         data-pane-open="false"
         data-pane-side={slot.side}
         ref={paneRef}
         style={{ gridColumn: `${slot.column} / ${slot.column + 1}` }}
       >
-        {/* Edge hot-zone: hovering it (or moving onto the revealed overlay)
-            keeps the panel open. Sits above main content but is invisible. */}
+        {/* Invisible edge hot-zone — hovering/focusing it floats the panel in. */}
         <button
-          aria-expanded={hoverRevealed}
+          aria-expanded={revealed}
           aria-label={`Reveal ${id}`}
           className={cn(
             'pointer-events-auto absolute inset-y-0 z-30 w-3 cursor-pointer [-webkit-app-region:no-drag]',
-            slot.side === 'left' ? 'left-0' : 'right-0'
+            left ? 'left-0' : 'right-0'
           )}
           onFocus={() => setHoverRevealed(true)}
           onPointerEnter={() => setHoverRevealed(true)}
           type="button"
         />
 
-        {/* Floating panel — fixed-height, absolutely positioned over the main
-            column. Slides in from the edge; hidden (translated off-edge) until
-            hovered/focused. */}
+        {/* Floating panel — full-height, anchored to the edge, slid off until revealed. */}
         <div
           className={cn(
             'pointer-events-auto absolute inset-y-0 z-30 overflow-hidden transition-transform duration-200 ease-out',
-            slot.side === 'left'
-              ? hoverRevealed
-                ? 'translate-x-0'
-                : '-translate-x-[calc(100%+1rem)]'
-              : hoverRevealed
-                ? 'translate-x-0'
-                : 'translate-x-[calc(100%+1rem)]'
+            revealed ? 'translate-x-0' : left ? '-translate-x-[calc(100%+1rem)]' : 'translate-x-[calc(100%+1rem)]'
           )}
           onPointerEnter={() => setHoverRevealed(true)}
           onPointerLeave={() => setHoverRevealed(false)}
-          style={{ ...revealEdge, width: overlayWidth }}
+          style={{ [left ? 'left' : 'right']: 0, width: overlayWidth }}
         >
           <div className="flex h-full w-full flex-col">{children}</div>
         </div>

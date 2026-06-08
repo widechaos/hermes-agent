@@ -248,8 +248,7 @@ export function ChatSidebar({
   const { t } = useI18n()
   const s = t.sidebar
   const sidebarOpen = useStore($sidebarOpen)
-  // When collapsed but hover-revealed (floated over content), render the full
-  // sidebar — search field, pinned + recents — not just the nav rail.
+  // Collapsed-but-hover-revealed → render the full sidebar, not just the nav rail.
   const sidebarRevealed = useStore($sidebarRevealed)
   const contentVisible = sidebarOpen || sidebarRevealed
   const panesFlipped = useStore($panesFlipped)
@@ -586,10 +585,7 @@ export function ChatSidebar({
         sidebarOpen
           ? 'border-(--sidebar-edge-border) bg-(--ui-sidebar-surface-background) opacity-100'
           : 'pointer-events-none border-transparent bg-transparent opacity-0',
-        // Hover-reveal overlay: when collapsed, the PaneShell floats this
-        // sidebar over the content and marks the wrapper `data-pane-hover-reveal`.
-        // Force it fully visible + interactive while revealed, regardless of the
-        // collapsed (sidebarOpen=false) styling above.
+        // While floated by PaneShell's hover-reveal, force visible + interactive.
         'in-data-[pane-hover-reveal=open]:pointer-events-auto in-data-[pane-hover-reveal=open]:border-(--sidebar-edge-border) in-data-[pane-hover-reveal=open]:bg-(--ui-sidebar-surface-background) in-data-[pane-hover-reveal=open]:opacity-100'
       )}
       collapsible="none"
