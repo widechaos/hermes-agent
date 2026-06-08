@@ -36,8 +36,8 @@ export interface PaneProps {
   forceCollapsed?: boolean
   /** When collapsed, float the contents over the main column on hover/focus instead of hiding them (track stays 0px). */
   hoverReveal?: boolean
-  /** Called with true while the pane is in collapsed hover-reveal mode, so the consumer can keep contents mounted (ready to slide). */
-  onHoverRevealChange?: (overlayActive: boolean) => void
+  /** Called with true while the pane is a collapsed hover-reveal overlay, so the consumer can keep contents mounted (ready to slide). */
+  onOverlayActiveChange?: (overlayActive: boolean) => void
   id: string
   maxWidth?: WidthValue
   minWidth?: WidthValue
@@ -219,7 +219,7 @@ export function Pane({
   id,
   maxWidth,
   minWidth,
-  onHoverRevealChange,
+  onOverlayActiveChange,
   resizable = false,
   width
 }: PaneProps) {
@@ -270,8 +270,8 @@ export function Pane({
 
   // Keep contents mounted while collapsed so reveal is a pure CSS transform.
   useEffect(() => {
-    onHoverRevealChange?.(overlayActive)
-  }, [onHoverRevealChange, overlayActive])
+    onOverlayActiveChange?.(overlayActive)
+  }, [onOverlayActiveChange, overlayActive])
 
   const canResize = open && resizable
   const lo = widthToPx(minWidth) ?? DEFAULT_RESIZE_MIN_WIDTH

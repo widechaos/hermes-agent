@@ -24,7 +24,7 @@ import {
   FILE_BROWSER_MAX_WIDTH,
   FILE_BROWSER_MIN_WIDTH,
   pinSession,
-  setSidebarRevealed,
+  setSidebarOverlayMounted,
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_SESSIONS_PAGE_SIZE,
@@ -888,7 +888,7 @@ export function DesktopController() {
         id="chat-sidebar"
         maxWidth={SIDEBAR_MAX_WIDTH}
         minWidth={SIDEBAR_DEFAULT_WIDTH}
-        onHoverRevealChange={setSidebarRevealed}
+        onOverlayActiveChange={setSidebarOverlayMounted}
         resizable
         side={sidebarSide}
         width={`${SIDEBAR_DEFAULT_WIDTH}px`}

@@ -47,9 +47,9 @@ import {
   $sidebarAgentsGrouped,
   $sidebarCronOpen,
   $sidebarOpen,
+  $sidebarOverlayMounted,
   $sidebarPinsOpen,
   $sidebarRecentsOpen,
-  $sidebarRevealed,
   pinSession,
   reorderPinnedSession,
   SESSION_SEARCH_FOCUS_EVENT,
@@ -248,9 +248,9 @@ export function ChatSidebar({
   const { t } = useI18n()
   const s = t.sidebar
   const sidebarOpen = useStore($sidebarOpen)
-  // Collapsed-but-hover-revealed → render the full sidebar, not just the nav rail.
-  const sidebarRevealed = useStore($sidebarRevealed)
-  const contentVisible = sidebarOpen || sidebarRevealed
+  // Collapsed-but-overlay-mounted → render the full sidebar, not just the nav rail.
+  const overlayMounted = useStore($sidebarOverlayMounted)
+  const contentVisible = sidebarOpen || overlayMounted
   const panesFlipped = useStore($panesFlipped)
   const agentsGrouped = useStore($sidebarAgentsGrouped)
   const pinnedSessionIds = useStore($pinnedSessionIds)
