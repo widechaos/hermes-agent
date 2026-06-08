@@ -79,6 +79,9 @@ const HOVER_INTENT_INTERVAL = 90 // ms between position polls
 const HOVER_INTENT_SENSITIVITY = 5 // px; below this between polls === settled
 const HOVER_REVEAL_SLIDE_MS = 260 // panel slide-in duration; inert until elapsed
 const HOVER_REVEAL_GRACE = 24 // px slop around the panel before a revealed pane closes
+// Leave the outermost edge strip to the OS window-resize grab area — the
+// hot-zone starts inside it so reaching for the resize edge doesn't arm a reveal.
+const HOVER_REVEAL_EDGE_GUTTER = 8 // px
 
 // Fired (window CustomEvent<{ id }>) to toggle a force-collapsed pane's reveal
 // from the keyboard, since its store-open toggle is a no-op while collapsed.
@@ -504,15 +507,13 @@ export function Pane({
         <button
           aria-expanded={revealed}
           aria-label={`Reveal ${id}`}
-          className={cn(
-            'pointer-events-auto absolute inset-y-0 z-30 w-3 cursor-default [-webkit-app-region:no-drag]',
-            left ? 'left-0' : 'right-0'
-          )}
+          className="pointer-events-auto absolute inset-y-0 z-30 w-3 cursor-default [-webkit-app-region:no-drag]"
           onFocus={() => setHoverRevealed(true)}
           onPointerDown={stopPoll}
           onPointerEnter={onEdgeEnter}
           onPointerLeave={stopPoll}
           onPointerMove={onEdgeMove}
+          style={{ [left ? 'left' : 'right']: HOVER_REVEAL_EDGE_GUTTER }}
           type="button"
         />
 
