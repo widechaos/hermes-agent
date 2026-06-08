@@ -70,6 +70,11 @@ interface CollectedPane {
 const DEFAULT_WIDTH = '16rem'
 const DEFAULT_RESIZE_MIN_WIDTH = 160
 
+// Hover-intent gate: only arm the reveal when the pointer is moving slowly
+// inside the edge zone. A fast sweep (heading for the titlebar/statusbar or
+// off the window) blows past this threshold and never triggers.
+const HOVER_INTENT_MAX_SPEED = 0.55 // px per ms
+
 const widthToCss = (value: WidthValue | undefined, fallback: string) =>
   value === undefined ? fallback : typeof value === 'number' ? `${value}px` : value
 
@@ -214,7 +219,32 @@ export function Pane({
   const paneStates = useStore($paneStates)
   const registered = useRef(false)
   const paneRef = useRef<HTMLDivElement | null>(null)
+  const lastSample = useRef<{ t: number; x: number; y: number } | null>(null)
   const [hoverRevealed, setHoverRevealed] = useState(false)
+
+  // Arm the reveal only on a slow, deliberate pass through the edge zone —
+  // ignore fast fly-bys (toward the titlebar/statusbar, or leaving the window).
+  const onEdgeMove = useCallback((e: ReactPointerEvent<HTMLButtonElement>) => {
+    const prev = lastSample.current
+    const now = e.timeStamp
+    lastSample.current = { t: now, x: e.clientX, y: e.clientY }
+
+    if (!prev) {
+      return
+    }
+
+    const dt = now - prev.t
+
+    if (dt <= 0) {
+      return
+    }
+
+    const speed = Math.hypot(e.clientX - prev.x, e.clientY - prev.y) / dt
+
+    if (speed <= HOVER_INTENT_MAX_SPEED) {
+      setHoverRevealed(true)
+    }
+  }, [])
 
   useEffect(() => {
     if (registered.current) {
@@ -322,7 +352,7 @@ export function Pane({
         ref={paneRef}
         style={{ gridColumn: `${slot.column} / ${slot.column + 1}` }}
       >
-        {/* Invisible edge hot-zone — hovering/focusing it floats the panel in. */}
+        {/* Invisible edge hot-zone — a slow, intentful pass floats the panel in. */}
         <button
           aria-expanded={revealed}
           aria-label={`Reveal ${id}`}
@@ -331,14 +361,17 @@ export function Pane({
             left ? 'left-0' : 'right-0'
           )}
           onFocus={() => setHoverRevealed(true)}
-          onPointerEnter={() => setHoverRevealed(true)}
+          onPointerLeave={() => {
+            lastSample.current = null
+          }}
+          onPointerMove={onEdgeMove}
           type="button"
         />
 
         {/* Floating panel — full-height, anchored to the edge, slid off until revealed. */}
         <div
           className={cn(
-            'pointer-events-auto absolute inset-y-0 z-30 overflow-hidden transition-transform duration-200 ease-out',
+            'pointer-events-auto absolute inset-y-0 z-30 overflow-hidden transition-transform duration-[260ms] ease-[cubic-bezier(0.32,0.72,0,1)]',
             revealed ? 'translate-x-0' : left ? '-translate-x-[calc(100%+1rem)]' : 'translate-x-[calc(100%+1rem)]'
           )}
           onPointerEnter={() => setHoverRevealed(true)}
