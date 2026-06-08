@@ -70,18 +70,16 @@ interface CollectedPane {
 const DEFAULT_WIDTH = '16rem'
 const DEFAULT_RESIZE_MIN_WIDTH = 160
 
-// Hover-intent gate (port of Brian Cherne's hoverIntent algorithm). Rather than
-// reacting to a single slow pointermove, poll the pointer every INTERVAL and
-// only arm once it has *settled* — i.e. moved less than SENSITIVITY px between
-// two consecutive polls while inside the edge zone. A fast fly-by, a window
-// resize drift, or a pass-through never produces two close samples in a row.
-const HOVER_INTENT_INTERVAL = 90 // ms between position polls
-const HOVER_INTENT_SENSITIVITY = 5 // px; below this between polls === settled
-const HOVER_REVEAL_SLIDE_MS = 260 // panel slide-in duration; inert until elapsed
-const HOVER_REVEAL_GRACE = 24 // px slop around the panel before a revealed pane closes
-// Leave the outermost edge strip to the OS window-resize grab area — the
-// hot-zone starts inside it so reaching for the resize edge doesn't arm a reveal.
-const HOVER_REVEAL_EDGE_GUTTER = 8 // px
+// Hover-reveal slide. The enter delay is a pure-CSS hover-intent gate: a fast
+// pass-through (toward the titlebar/statusbar, or a resize-edge grab) doesn't
+// dwell on the trigger long enough for the delay to elapse, so it never opens.
+const HOVER_REVEAL_SLIDE_MS = 220
+const HOVER_REVEAL_ENTER_DELAY_MS = 130
+const HOVER_REVEAL_EASE = 'cubic-bezier(0.32,0.72,0,1)'
+// Thin edge strip that arms the reveal on hover, inset past the OS window-resize
+// grab area so dragging the window edge doesn't trigger it.
+const HOVER_REVEAL_TRIGGER_WIDTH = 14 // px
+const HOVER_REVEAL_EDGE_GUTTER = 6 // px
 
 // Fired (window CustomEvent<{ id }>) to toggle a force-collapsed pane's reveal
 // from the keyboard, since its store-open toggle is a no-op while collapsed.
@@ -231,188 +229,18 @@ export function Pane({
   const paneStates = useStore($paneStates)
   const registered = useRef(false)
   const paneRef = useRef<HTMLDivElement | null>(null)
-  const panelRef = useRef<HTMLDivElement | null>(null)
-  const pointer = useRef({ x: 0, y: 0 }) // live cursor pos (cheap to update)
-  const polled = useRef({ x: 0, y: 0 }) // pos at the previous poll
-  const pollId = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const resizingUntil = useRef(0)
-  // True while the current reveal was opened by keyboard and the pointer hasn't
-  // entered the panel yet — suppresses geometry-close so a stray move (or hotkey
-  // spam) doesn't immediately shut it.
-  const keyboardHeld = useRef(false)
-  const [hoverRevealed, setHoverRevealed] = useState(false)
-  // True once the slide-in has had time to finish; gates the panel inert until
-  // then so the cursor never flips or lands on a row before it's in view.
-  const [interactive, setInteractive] = useState(false)
+  // Keyboard (mod+b / mod+j) pins the reveal open while collapsed, independent
+  // of hover. Hover open/close is pure CSS (see the overlay markup).
+  const [forced, setForced] = useState(false)
 
   const slot = ctx?.paneById.get(id)
   const open = Boolean(slot?.open && !disabled)
   const side = slot?.side ?? 'left'
-  // Keep the current side reachable from the (deps-free) poll callback.
-  const sideRef = useRef(side)
-  sideRef.current = side
   // Collapsed + hoverReveal: float the pane contents over the main column on
   // hover/focus instead of hiding them. Honors any persisted resize width.
   const overlayActive = !open && hoverReveal && !disabled
   const override = resizable ? paneStates[id]?.widthOverride : undefined
   const overlayWidth = override !== undefined ? `${override}px` : widthToCss(width, DEFAULT_WIDTH)
-  const revealed = overlayActive && hoverRevealed
-
-  const stopPoll = useCallback(() => {
-    if (pollId.current !== null) {
-      clearTimeout(pollId.current)
-      pollId.current = null
-    }
-  }, [])
-
-  // hoverIntent poll: fire once the cursor has settled (moved < SENSITIVITY px
-  // between two polls); otherwise resample and keep waiting. Bail on a held
-  // button (drag/resize) or within the post-resize cooldown.
-  const poll = useCallback(() => {
-    pollId.current = null
-
-    if (performance.now() < resizingUntil.current) {
-      polled.current = { ...pointer.current }
-      pollId.current = setTimeout(poll, HOVER_INTENT_INTERVAL)
-
-      return
-    }
-
-    const moved = Math.hypot(pointer.current.x - polled.current.x, pointer.current.y - polled.current.y)
-
-    if (moved < HOVER_INTENT_SENSITIVITY) {
-      // Don't arm if the cursor settled within the OS window-resize grab strip
-      // at the very edge — that's a resize reach, not a reveal intent.
-      const edgeDist =
-        sideRef.current === 'left' ? pointer.current.x : window.innerWidth - pointer.current.x
-
-      if (edgeDist >= HOVER_REVEAL_EDGE_GUTTER) {
-        setHoverRevealed(true)
-
-        return
-      }
-    }
-
-    polled.current = { ...pointer.current }
-    pollId.current = setTimeout(poll, HOVER_INTENT_INTERVAL)
-  }, [])
-
-  const onEdgeEnter = useCallback(
-    (e: ReactPointerEvent<HTMLButtonElement>) => {
-      if (e.buttons !== 0) {
-        return
-      }
-
-      pointer.current = { x: e.clientX, y: e.clientY }
-      polled.current = { ...pointer.current }
-      stopPoll()
-      pollId.current = setTimeout(poll, HOVER_INTENT_INTERVAL)
-    },
-    [poll, stopPoll]
-  )
-
-  const onEdgeMove = useCallback((e: ReactPointerEvent<HTMLButtonElement>) => {
-    pointer.current = { x: e.clientX, y: e.clientY }
-  }, [])
-
-  // A window resize parks the cursor on the screen edge and drifts it slowly,
-  // which would otherwise read as settled intent. Suppress during + just after.
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return
-    }
-
-    const onResize = () => {
-      resizingUntil.current = performance.now() + 250
-      setHoverRevealed(false)
-    }
-
-    window.addEventListener('resize', onResize)
-
-    return () => window.removeEventListener('resize', onResize)
-  }, [])
-
-  useEffect(() => stopPoll, [stopPoll])
-
-  // Keyboard toggle (mod+b / mod+j) routes here when the track is force-collapsed
-  // (narrow window) so the shortcut still does something — it flips the reveal.
-  // Mark keyboard-opened so the geometry watcher doesn't slam it shut on the
-  // first stray pointermove (lets you spam the hotkey; mouse takes over once it
-  // actually enters the panel).
-  useEffect(() => {
-    if (typeof window === 'undefined' || !overlayActive) {
-      return
-    }
-
-    const onToggle = (e: Event) => {
-      if ((e as CustomEvent<{ id: string }>).detail?.id === id) {
-        stopPoll()
-        keyboardHeld.current = true
-        setHoverRevealed(v => !v)
-      }
-    }
-
-    window.addEventListener(PANE_TOGGLE_REVEAL_EVENT, onToggle)
-
-    return () => window.removeEventListener(PANE_TOGGLE_REVEAL_EVENT, onToggle)
-  }, [id, overlayActive, stopPoll])
-
-  // While revealed, drive close off cursor geometry rather than pointer-events
-  // bookkeeping: a panel that slid in under a still cursor never fires
-  // pointerenter/leave, so listen on the document and close once the cursor
-  // leaves the panel rect (plus a grace margin). Robust regardless of what the
-  // panel's contents do with their own transitions/hit-testing.
-  useEffect(() => {
-    if (typeof window === 'undefined' || !hoverRevealed) {
-      return
-    }
-
-    const onMove = (e: PointerEvent) => {
-      const rect = panelRef.current?.getBoundingClientRect()
-
-      if (!rect) {
-        return
-      }
-
-      const out =
-        e.clientX < rect.left - HOVER_REVEAL_GRACE ||
-        e.clientX > rect.right + HOVER_REVEAL_GRACE ||
-        e.clientY < rect.top - HOVER_REVEAL_GRACE ||
-        e.clientY > rect.bottom + HOVER_REVEAL_GRACE
-
-      // Keyboard-opened: ignore geometry until the cursor actually reaches the
-      // panel, then hand control to the mouse (close when it leaves).
-      if (keyboardHeld.current) {
-        if (!out) {
-          keyboardHeld.current = false
-        }
-
-        return
-      }
-
-      if (out) {
-        setHoverRevealed(false)
-      }
-    }
-
-    window.addEventListener('pointermove', onMove)
-
-    return () => window.removeEventListener('pointermove', onMove)
-  }, [hoverRevealed])
-
-  // Hold the panel inert for the slide-in duration, then let it take pointers.
-  useEffect(() => {
-    if (!hoverRevealed) {
-      setInteractive(false)
-      keyboardHeld.current = false
-
-      return
-    }
-
-    const t = setTimeout(() => setInteractive(true), HOVER_REVEAL_SLIDE_MS)
-
-    return () => clearTimeout(t)
-  }, [hoverRevealed])
 
   useEffect(() => {
     if (registered.current) {
@@ -423,25 +251,35 @@ export function Pane({
     ensurePaneRegistered(id, { open: defaultOpen })
   }, [defaultOpen, id])
 
-  const canResize = open && resizable
-  const lo = widthToPx(minWidth) ?? DEFAULT_RESIZE_MIN_WIDTH
-  const hi = widthToPx(maxWidth) ?? Number.POSITIVE_INFINITY
-
-  // Reset stale reveal state when the track reopens/disables, and surface the
-  // effective state so consumers can render full content while floated.
+  // Keyboard toggle while collapsed: pin/unpin the reveal. Clear the pin if the
+  // pane stops being a collapsed overlay (reopened / widened).
   useEffect(() => {
-    if (!overlayActive) {
-      setHoverRevealed(false)
-    }
-  }, [overlayActive])
+    if (typeof window === 'undefined' || !overlayActive) {
+      setForced(false)
 
-  // Report overlay-mode (not just the live reveal) so the consumer can keep the
-  // panel's contents MOUNTED while collapsed — otherwise the heavy mount happens
-  // on reveal and stalls the slide a frame (very visible on the instant keyboard
-  // toggle). Visibility is handled separately via the data-pane-hover-reveal attr.
+      return
+    }
+
+    const onToggle = (e: Event) => {
+      if ((e as CustomEvent<{ id: string }>).detail?.id === id) {
+        setForced(v => !v)
+      }
+    }
+
+    window.addEventListener(PANE_TOGGLE_REVEAL_EVENT, onToggle)
+
+    return () => window.removeEventListener(PANE_TOGGLE_REVEAL_EVENT, onToggle)
+  }, [id, overlayActive])
+
+  // Keep contents MOUNTED while collapsed so reveal is a pure CSS transform (no
+  // mount stall on the slide). Visibility is handled by hover/forced in markup.
   useEffect(() => {
     onHoverRevealChange?.(overlayActive)
   }, [onHoverRevealChange, overlayActive])
+
+  const canResize = open && resizable
+  const lo = widthToPx(minWidth) ?? DEFAULT_RESIZE_MIN_WIDTH
+  const hi = widthToPx(maxWidth) ?? Number.POSITIVE_INFINITY
 
   const startResize = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -498,51 +336,57 @@ export function Pane({
     return null
   }
 
-  // Collapsed hover-reveal track: grid cell stays 0px (no reserved space) but
-  // unclipped — the hot-zone and floating panel escape it via absolute
-  // positioning, rendering over the main content instead of pushing it.
+  // Collapsed hover-reveal track: the grid cell stays 0px (no reserved space)
+  // and is pointer-transparent. A thin edge trigger + the floating panel live
+  // inside it, escaping the zero box via absolute positioning. Open/close is
+  // pure CSS — group-hover (or data-forced from the keyboard) drives a transform
+  // — with a transition-delay on the way IN as a hover-intent gate: a fast
+  // pass-by (toward the titlebar/statusbar or a resize-edge grab) doesn't dwell
+  // long enough for the delay to elapse, so it never opens. No JS pointer math.
   if (overlayActive) {
     const left = slot.side === 'left'
+    const edge = left ? 'left' : 'right'
+    const offscreen = left ? '-translate-x-[calc(100%+1rem)]' : 'translate-x-[calc(100%+1rem)]'
 
     return (
       <div
-        className={cn('pointer-events-none relative row-start-1 min-w-0', className)}
-        data-pane-hover-reveal={revealed ? 'open' : 'closed'}
+        className={cn('group/reveal pointer-events-none relative row-start-1 min-w-0', className)}
+        data-forced={forced ? '' : undefined}
+        data-pane-hover-reveal={forced ? 'open' : 'closed'}
         data-pane-id={id}
         data-pane-open="false"
         data-pane-side={slot.side}
         ref={paneRef}
         style={{ gridColumn: `${slot.column} / ${slot.column + 1}` }}
       >
-        {/* Invisible edge hot-zone — a settled hover (hoverIntent) floats the panel in.
-            No pointer cursor: it's invisible, so it must not betray itself before reveal. */}
-        <button
-          aria-expanded={revealed}
-          aria-label={`Reveal ${id}`}
-          className={cn(
-            'pointer-events-auto absolute inset-y-0 z-30 w-4 cursor-default [-webkit-app-region:no-drag]',
-            left ? 'left-0' : 'right-0'
-          )}
-          onFocus={() => setHoverRevealed(true)}
-          onPointerDown={stopPoll}
-          onPointerEnter={onEdgeEnter}
-          onPointerLeave={stopPoll}
-          onPointerMove={onEdgeMove}
-          type="button"
+        {/* Thin edge trigger — hovering it (group-hover) reveals. Inset past the
+            OS window-resize grab strip so dragging the window edge won't open it. */}
+        <div
+          aria-hidden="true"
+          className="pointer-events-auto absolute inset-y-0 z-30 [-webkit-app-region:no-drag]"
+          style={{ [edge]: HOVER_REVEAL_EDGE_GUTTER, width: HOVER_REVEAL_TRIGGER_WIDTH }}
         />
 
-        {/* Floating panel — full-height, anchored to the edge, slid off until revealed.
-            Inert (no hit-testing, no cursor) until the slide-in elapses, so the cursor
-            never flips or lands on a row before it's in view. Close is driven by the
-            document pointermove geometry watcher above, not pointerleave. */}
+        {/* Floating panel — full-height, edge-anchored, slid off until revealed.
+            group-hover (trigger or panel) OR data-forced slides it in; intent
+            delay on enter, instant on leave. Inert + transparent while hidden. */}
         <div
           className={cn(
-            'absolute inset-y-0 z-30 overflow-hidden transition-transform duration-[260ms] ease-[cubic-bezier(0.32,0.72,0,1)]',
-            revealed && interactive ? 'pointer-events-auto' : 'pointer-events-none',
-            revealed ? 'translate-x-0' : left ? '-translate-x-[calc(100%+1rem)]' : 'translate-x-[calc(100%+1rem)]'
+            'pointer-events-none absolute inset-y-0 z-30 overflow-hidden',
+            'transition-transform delay-0 ease-[var(--reveal-ease)] duration-[var(--reveal-slide)]',
+            offscreen,
+            'group-hover/reveal:pointer-events-auto group-hover/reveal:translate-x-0 group-hover/reveal:delay-[var(--reveal-enter-delay)]',
+            'group-data-[forced]/reveal:pointer-events-auto group-data-[forced]/reveal:translate-x-0 group-data-[forced]/reveal:delay-0'
           )}
-          ref={panelRef}
-          style={{ [left ? 'left' : 'right']: 0, width: overlayWidth }}
+          style={
+            {
+              [edge]: 0,
+              width: overlayWidth,
+              '--reveal-slide': `${HOVER_REVEAL_SLIDE_MS}ms`,
+              '--reveal-enter-delay': `${HOVER_REVEAL_ENTER_DELAY_MS}ms`,
+              '--reveal-ease': HOVER_REVEAL_EASE
+            } as CSSProperties
+          }
         >
           <div className="flex h-full w-full flex-col">{children}</div>
         </div>
