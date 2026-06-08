@@ -37,7 +37,7 @@ function FieldInput({
 }) {
   if (field.type === "enum" || field.type === "weekdays") {
     return (
-      <Select value={value} onChange={(e) => onChange(e.target.value)}>
+      <Select value={value} onValueChange={(v) => onChange(v)}>
         {field.options.map((opt) => (
           <SelectOption key={opt} value={opt}>
             {opt}
@@ -69,13 +69,14 @@ function FieldInput({
 function RecipeCard({
   recipe,
   profile,
+  showToast,
   onCreated,
 }: {
   recipe: CronRecipe;
   profile: string;
+  showToast: (message: string, type: "error" | "success") => void;
   onCreated?: () => void;
 }) {
-  const { toast } = useToast();
   const [open, setOpen] = useState(false);
   const [values, setValues] = useState<Record<string, string>>(() => initialValues(recipe));
   const [submitting, setSubmitting] = useState(false);
@@ -86,10 +87,8 @@ function RecipeCard({
     setError(null);
     try {
       const job = await api.instantiateCronRecipe({ recipe: recipe.key, values }, profile);
-      toast({
-        title: "Automation scheduled",
-        description: `${recipe.title} — ${job.schedule_display ?? ""}`,
-      });
+      const when = job.schedule_display ? ` — ${job.schedule_display}` : "";
+      showToast(`${recipe.title} scheduled${when}`, "success");
       setOpen(false);
       setValues(initialValues(recipe));
       onCreated?.();
@@ -100,10 +99,10 @@ function RecipeCard({
     } finally {
       setSubmitting(false);
     }
-  }, [recipe, values, profile, toast, onCreated]);
+  }, [recipe, values, profile, showToast, onCreated]);
 
   return (
-    <Card className={cn("overflow-hidden", themedBody())}>
+    <Card className={cn("overflow-hidden", themedBody)}>
       <CardContent className="space-y-3 p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -114,14 +113,14 @@ function RecipeCard({
             <p className="mt-1 text-sm opacity-70">{recipe.description}</p>
             <div className="mt-2 flex flex-wrap gap-1">
               {recipe.tags.map((t) => (
-                <Badge key={t} variant="secondary">
+                <Badge key={t} tone="secondary">
                   {t}
                 </Badge>
               ))}
             </div>
           </div>
           <Button
-            variant={open ? "ghost" : "default"}
+            ghost={open}
             size="sm"
             onClick={() => setOpen((o) => !o)}
           >
@@ -169,6 +168,7 @@ function RecipeCard({
  * via the same create_job path as everything else.
  */
 export function CronRecipes({ profile, onCreated }: CronRecipesProps) {
+  const { toast, showToast } = useToast();
   const [recipes, setRecipes] = useState<CronRecipe[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -203,10 +203,16 @@ export function CronRecipes({ profile, onCreated }: CronRecipesProps) {
 
   return (
     <>
-      <Toast />
+      <Toast toast={toast} />
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         {recipes.map((r) => (
-          <RecipeCard key={r.key} recipe={r} profile={profile} onCreated={onCreated} />
+          <RecipeCard
+            key={r.key}
+            recipe={r}
+            profile={profile}
+            showToast={showToast}
+            onCreated={onCreated}
+          />
         ))}
       </div>
     </>
