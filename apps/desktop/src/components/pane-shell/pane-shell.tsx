@@ -77,7 +77,7 @@ const DEFAULT_RESIZE_MIN_WIDTH = 160
 // resize drift, or a pass-through never produces two close samples in a row.
 const HOVER_INTENT_INTERVAL = 90 // ms between position polls
 const HOVER_INTENT_SENSITIVITY = 5 // px; below this between polls === settled
-const HOVER_REVEAL_SLIDE_MS = 130 // panel slide-in duration; inert until elapsed
+const HOVER_REVEAL_SLIDE_MS = 260 // panel slide-in duration; inert until elapsed
 const HOVER_REVEAL_GRACE = 24 // px slop around the panel before a revealed pane closes
 
 // Fired (window CustomEvent<{ id }>) to toggle a force-collapsed pane's reveal
@@ -499,7 +499,7 @@ export function Pane({
             document pointermove geometry watcher above, not pointerleave. */}
         <div
           className={cn(
-            'absolute inset-y-0 z-30 overflow-hidden transition-transform duration-[130ms] ease-[cubic-bezier(0.32,0.72,0,1)]',
+            'absolute inset-y-0 z-30 overflow-hidden transition-transform duration-[260ms] ease-[cubic-bezier(0.32,0.72,0,1)]',
             revealed && interactive ? 'pointer-events-auto' : 'pointer-events-none',
             revealed ? 'translate-x-0' : left ? '-translate-x-[calc(100%+1rem)]' : 'translate-x-[calc(100%+1rem)]'
           )}
