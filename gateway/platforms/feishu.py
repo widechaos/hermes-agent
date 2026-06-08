@@ -108,6 +108,7 @@ try:
     from lark_oapi.core.model import BaseRequest
     from lark_oapi.event.callback.model.p2_card_action_trigger import (
         CallBackCard,
+        CallBackToast,
         P2CardActionTriggerResponse,
     )
     from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
@@ -118,6 +119,7 @@ except ImportError:
     FEISHU_AVAILABLE = False
     lark = None  # type: ignore[assignment]
     CallBackCard = None  # type: ignore[assignment]
+    CallBackToast = None  # type: ignore[assignment]
     P2CardActionTriggerResponse = None  # type: ignore[assignment]
     EventDispatcherHandler = None  # type: ignore[assignment]
     FeishuWSClient = None  # type: ignore[assignment]
@@ -607,6 +609,324 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
 
     _flush_current()
     return rows or [[{"tag": "md", "text": content}]]
+
+
+# ---------------------------------------------------------------------------
+# Markdown table → Feishu interactive card conversion
+# ---------------------------------------------------------------------------
+
+_MARKDOWN_TABLE_ROW_RE = re.compile(r"^\|.*\|$")
+_MARKDOWN_TABLE_SEP_RE = re.compile(r"^\|[-:| ]+\|$")
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
+
+
+def _has_lines_outside_fence(lines: list, *, predicate) -> bool:
+    """True if *predicate*(line) is true on any line outside code fences."""
+    in_code_block = False
+    for line in lines:
+        stripped = line.strip()
+        if not in_code_block and _MARKDOWN_FENCE_OPEN_RE.match(stripped):
+            in_code_block = True
+            continue
+        if in_code_block and _MARKDOWN_FENCE_CLOSE_RE.match(stripped):
+            in_code_block = False
+            continue
+        if not in_code_block and predicate(stripped):
+            return True
+    return False
+
+
+def _has_markdown_table_outside_fence(content: str) -> bool:
+    """Check for markdown tables outside code fences."""
+    lines = content.split("\n")
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        # Skip fenced code blocks entirely.
+        if _MARKDOWN_FENCE_OPEN_RE.match(stripped):
+            i += 1
+            while i < len(lines):
+                if _MARKDOWN_FENCE_CLOSE_RE.match(lines[i].strip()):
+                    i += 1
+                    break
+                i += 1
+            continue
+        if (i + 1 < len(lines)
+                and _MARKDOWN_TABLE_ROW_RE.match(stripped)
+                and _MARKDOWN_TABLE_SEP_RE.match(lines[i + 1].strip())):
+            return True
+        i += 1
+    return False
+
+
+def _has_inline_code_outside_fence(content: str) -> bool:
+    """Check for inline code (backtick pairs) outside code fences."""
+    return _has_lines_outside_fence(
+        content.split("\n"),
+        predicate=lambda line: bool(_INLINE_CODE_RE.search(line)),
+    )
+
+
+@dataclass(frozen=True)
+class _MarkdownTable:
+    """A markdown table extracted from text."""
+    before: str = ""
+    after: str = ""
+    headers: list = field(default_factory=list)
+    rows: list = field(default_factory=list)
+
+
+def _extract_first_markdown_table(content: str):
+    """Extract the first markdown table from content."""
+
+    lines = content.split("\n")
+    header_idx = None
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if (_MARKDOWN_TABLE_ROW_RE.match(stripped)
+                and i + 1 < len(lines)
+                and _MARKDOWN_TABLE_SEP_RE.match(lines[i + 1].strip())):
+            header_idx = i
+            break
+
+    if header_idx is None:
+        return None
+
+    headers = [cell.strip() for cell in lines[header_idx].strip().split("|")[1:-1]]
+
+    end_idx = header_idx + 2  # skip header + separator
+    rows = []
+    for i in range(header_idx + 2, len(lines)):
+        stripped = lines[i].strip()
+        if _MARKDOWN_TABLE_ROW_RE.match(stripped):
+            row = [cell.strip() for cell in stripped.split("|")[1:-1]]
+            rows.append(row)
+            end_idx = i + 1
+        else:
+            break
+
+    before = "\n".join(lines[:header_idx])
+    after = "\n".join(lines[end_idx:])
+
+    return _MarkdownTable(before=before, after=after, headers=headers, rows=rows)
+
+
+def _normalize_feishu_card_markdown(content: str) -> str:
+    """Normalize markdown for Feishu card rendering.
+
+    - ``## Heading`` → ``**Heading**`` (any heading level)
+    - Inside fenced code blocks: preserve literally.
+    - Backticks are preserved as-is -- both ``lark_md`` and ``markdown``
+      card blocks support native `` `inline code` `` rendering.
+    """
+    lines = content.split("\n")
+    result = []
+    in_code_block = False
+
+    for raw_line in lines:
+        stripped = raw_line.strip()
+
+        if not in_code_block and _MARKDOWN_FENCE_OPEN_RE.match(stripped):
+            in_code_block = True
+            result.append(raw_line)
+            continue
+        if in_code_block and _MARKDOWN_FENCE_CLOSE_RE.match(stripped):
+            in_code_block = False
+            result.append(raw_line)
+            continue
+
+        if in_code_block:
+            result.append(raw_line)
+            continue
+
+        # Outside code fences: normalize.
+        line = raw_line
+
+        # Headings → bold
+        line = _HEADING_RE.sub(r"**\2**", line)
+
+        result.append(line)
+
+    return "\n".join(result)
+
+
+def _build_feishu_card(*, body_elements: list, header_title: str = "", header_template: str = "blue") -> dict:
+    """Build a Feishu interactive card in schema 2.0 format (matching OpenClaw).
+
+    Schema 2.0 is required for ``markdown`` block elements to render properly —
+    older card schemas strip or misrender code blocks, headings, and tables.
+    """
+    card: dict = {
+        "schema": "2.0",
+        "config": {"width_mode": "fill"},
+        "body": {"elements": body_elements},
+    }
+    if header_title:
+        card["header"] = {
+            "title": {"tag": "plain_text", "content": header_title},
+            "template": header_template,
+        }
+    return card
+
+
+_FEISHU_CARD_MAX_COLUMN_ELEMENTS = 30   # per-column sub-element limit
+_FEISHU_CARD_MAX_COLUMNS = 12           # per column_set column limit
+_FEISHU_CARD_MAX_BODY_ELEMENTS = 50     # per card body element limit
+
+
+def _table_to_column_sets(table_lines: list) -> list[dict]:
+    """Convert markdown table lines to one or more Feishu card column_set elements.
+
+    A single ``column_set`` cannot exceed Feishu's per-column element limit
+    (30 sub-elements including the header).  When a table has more data rows
+    than ``_FEISHU_CARD_MAX_COLUMN_ELEMENTS - 1``, we split it into multiple
+    ``column_set`` chunks, each repeating the header row for readability.
+
+    Returns a list of ``column_set`` dicts (usually one, more for large tables).
+    """
+    headers = [cell.strip() for cell in table_lines[0].strip().split("|")[1:-1]]
+    data_rows = []
+    for line in table_lines[2:]:
+        data_rows.append([cell.strip() for cell in line.strip().split("|")[1:-1]])
+
+    # Normalize cell content
+    headers = [_normalize_feishu_card_markdown(h) for h in headers]
+    data_rows = [
+        [_normalize_feishu_card_markdown(cell) for cell in row]
+        for row in data_rows
+    ]
+
+    # If too many columns, truncate to the limit
+    if len(headers) > _FEISHU_CARD_MAX_COLUMNS:
+        headers = headers[:_FEISHU_CARD_MAX_COLUMNS]
+        data_rows = [row[:_FEISHU_CARD_MAX_COLUMNS] for row in data_rows]
+
+    # Max data rows per chunk: limit - 1 (header occupies one slot)
+    max_rows_per_chunk = _FEISHU_CARD_MAX_COLUMN_ELEMENTS - 1
+
+    # Fast path: table fits in a single column_set
+    if len(data_rows) <= max_rows_per_chunk:
+        return [_build_single_column_set(headers, data_rows)]
+
+    # Split into chunks
+    sets = []
+    for start in range(0, len(data_rows), max_rows_per_chunk):
+        chunk = data_rows[start:start + max_rows_per_chunk]
+        sets.append(_build_single_column_set(headers, chunk))
+    return sets
+
+
+def _build_single_column_set(headers: list, data_rows: list) -> dict:
+    """Build a single column_set from headers and data rows."""
+    columns = []
+    for col_idx in range(len(headers)):
+        col_elements = [
+            {"tag": "markdown", "content": f"**{headers[col_idx]}**"}
+        ]
+        for row in data_rows:
+            col_elements.append(
+                {"tag": "markdown", "content": row[col_idx]}
+            )
+        columns.append({"tag": "column", "elements": col_elements})
+
+    return {"tag": "column_set", "columns": columns}
+
+
+def _build_markdown_table_card_payload(content: str) -> str:
+    """Build a Feishu interactive card payload from markdown with tables.
+
+    Converts tables to ``column_set`` blocks, normalises headings
+    and inline code, and preserves fenced code blocks literally.
+    """
+    lines = content.split("\n")
+    elements = []
+    in_code_block = False
+    current_text = []
+    current_table = []
+    in_table = False
+
+    def _flush_text():
+        if not current_text:
+            return
+        text = "\n".join(current_text)
+        normalized = _normalize_feishu_card_markdown(text)
+        if normalized.strip():
+            elements.append({
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": normalized},
+            })
+        current_text.clear()
+
+    def _flush_table():
+        if not current_table:
+            return
+        # Use markdown block for tables — native pipe table rendering
+        # with proper row alignment. column_set has independent column
+        # heights which causes row drift when cell content varies.
+        table_md = "\n".join(current_table)
+        elements.append({
+            "tag": "markdown",
+            "content": table_md,
+        })
+        current_table.clear()
+
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        is_fence_open = (
+            not in_code_block and _MARKDOWN_FENCE_OPEN_RE.match(stripped)
+        )
+        is_fence_close = (
+            in_code_block and _MARKDOWN_FENCE_CLOSE_RE.match(stripped)
+        )
+
+        if is_fence_open:
+            _flush_table()
+            in_table = False
+            current_text.append(lines[i])
+            in_code_block = True
+            i += 1
+        elif is_fence_close:
+            current_text.append(lines[i])
+            in_code_block = False
+            i += 1
+        elif in_code_block:
+            current_text.append(lines[i])
+            i += 1
+        elif not in_table:
+            if (i + 1 < len(lines)
+                    and _MARKDOWN_TABLE_ROW_RE.match(stripped)
+                    and _MARKDOWN_TABLE_SEP_RE.match(lines[i + 1].strip())):
+                _flush_text()
+                current_table = [lines[i], lines[i + 1]]
+                in_table = True
+                i += 2
+            else:
+                current_text.append(lines[i])
+                i += 1
+        else:  # in_table, not in code block
+            if _MARKDOWN_TABLE_ROW_RE.match(stripped):
+                current_table.append(lines[i])
+                i += 1
+            else:
+                _flush_table()
+                in_table = False
+                # re-process this line as text
+
+    _flush_table()
+    _flush_text()
+
+    # Guard: truncate if body elements exceed Feishu's per-card limit.
+    # The most important content is the table column_sets at the start;
+    # text divs at the end are lower priority.
+    if len(elements) > _FEISHU_CARD_MAX_BODY_ELEMENTS:
+        elements = elements[:_FEISHU_CARD_MAX_BODY_ELEMENTS]
+
+    return json.dumps(
+        _build_feishu_card(body_elements=elements), ensure_ascii=False
+    )
 
 
 def parse_feishu_post_payload(
@@ -2527,6 +2847,13 @@ class FeishuAdapter(BasePlatformAdapter):
 
         For other card actions: delegates to ``_handle_card_action_event``.
         """
+        try:
+            return self._on_card_action_trigger_impl(data)
+        except Exception:
+            logger.exception("[Feishu] Card action trigger crashed")
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
+
+    def _on_card_action_trigger_impl(self, data: Any) -> Any:
         loop = self._loop
         if not self._loop_accepts_callbacks(loop):
             logger.warning("[Feishu] Dropping card action before adapter loop is ready")
@@ -2535,11 +2862,20 @@ class FeishuAdapter(BasePlatformAdapter):
         event = getattr(data, "event", None)
         action = getattr(event, "action", None)
         action_value = getattr(action, "value", {}) or {}
+        logger.info("[Feishu] Card action trigger: action=%s value_type=%s value=%s",
+                     action, type(action_value).__name__, str(action_value)[:200])
+        # Feishu SDK returns action.value as a JSON string — parse it
+        if isinstance(action_value, str) and action_value.strip():
+            try:
+                action_value = json.loads(action_value)
+            except (json.JSONDecodeError, TypeError):
+                pass
         hermes_action = action_value.get("hermes_action") if isinstance(action_value, dict) else None
         update_prompt_action = (
             action_value.get("hermes_update_prompt_action")
             if isinstance(action_value, dict) else None
         )
+        conflict_action = action_value.get("conflict_action") if isinstance(action_value, dict) else None
 
         if hermes_action:
             return self._handle_approval_card_action(event=event, action_value=action_value, loop=loop)
@@ -2549,6 +2885,8 @@ class FeishuAdapter(BasePlatformAdapter):
                 action_value=action_value,
                 loop=loop,
             )
+        if conflict_action:
+            return self._handle_conflict_card_action(event=event, action_value=action_value, loop=loop)
 
         self._submit_on_loop(loop, self._handle_card_action_event(data))
         if P2CardActionTriggerResponse is None:
@@ -2696,6 +3034,104 @@ class FeishuAdapter(BasePlatformAdapter):
             card.data = self._build_resolved_update_prompt_card(answer=answer, user_name=user_name)
             response.card = card
         return response
+
+    def _handle_conflict_card_action(self, *, event: Any, action_value: Dict[str, Any], loop: Any) -> Any:
+        """Handle memory conflict resolution card button clicks synchronously."""
+        conflict_id = action_value.get("conflict_id")
+        choice = action_value.get("conflict_action")
+        if not conflict_id or choice not in ("keep_new", "keep_old", "merge"):
+            logger.debug("[Feishu] Invalid conflict card action: id=%s choice=%s", conflict_id, choice)
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
+
+        operator = getattr(event, "operator", None)
+        open_id = str(getattr(operator, "open_id", "") or "")
+        user_name = self._get_cached_sender_name(open_id) or open_id
+
+        import subprocess as _sp
+        try:
+            result = _sp.run(
+                ["python3", "/root/.hermes/scripts/memory_resolve.py", conflict_id, choice],
+                capture_output=True, text=True, timeout=10,
+            )
+            logger.info(
+                "[Feishu] Conflict %s resolved by %s: choice=%s stdout=%s stderr=%s",
+                conflict_id, user_name, choice,
+                result.stdout.strip()[:200], result.stderr.strip()[:200],
+            )
+        except Exception as exc:
+            logger.error("[Feishu] Conflict resolution failed for %s: %s", conflict_id, exc)
+
+        choice_label = {"keep_new": "保留新事实", "keep_old": "保留旧记忆", "merge": "合并保留"}.get(choice, choice)
+
+        # Inject a synthetic message to continue the agent after resolution
+        chat_context = getattr(event, "context", None)
+        chat_id = str(getattr(chat_context, "open_chat_id", "") or "")
+        if chat_id and self._loop_accepts_callbacks(loop):
+            synthetic_text = f"冲突 {conflict_id} 已裁决：{choice_label}"
+            self._submit_on_loop(
+                loop,
+                self._inject_conflict_resolution(
+                    chat_id=chat_id,
+                    open_id=open_id,
+                    user_name=user_name,
+                    text=synthetic_text,
+                ),
+            )
+
+        if P2CardActionTriggerResponse is None:
+            return None
+        response = P2CardActionTriggerResponse()
+        toast = CallBackToast()
+        toast.type = "success"
+        toast.content = f"✅ 已{choice_label}"
+        response.toast = toast
+        if CallBackCard is not None:
+            card = CallBackCard()
+            card.type = "raw"
+            card.data = {
+                "header": {
+                    "title": {"tag": "plain_text", "content": f"✅ 冲突已裁决"},
+                    "template": "green",
+                },
+                "elements": [
+                    {
+                        "tag": "div",
+                        "text": {
+                            "tag": "lark_md",
+                            "content": f"**裁决结果：**{choice_label}\\n**操作人：**{user_name}\\n**冲突 ID：**`{conflict_id}`",
+                        },
+                    },
+                ],
+            }
+            response.card = card
+        return response
+
+    async def _inject_conflict_resolution(
+        self, *, chat_id: str, open_id: str, user_name: str, text: str
+    ) -> None:
+        """Inject a synthetic text event so the agent continues after conflict resolution."""
+        sender_id = SimpleNamespace(open_id=open_id, user_id=None, union_id=None)
+        sender_profile = await self._resolve_sender_profile(sender_id)
+        chat_info = await self.get_chat_info(chat_id)
+        source = self.build_source(
+            chat_id=chat_id,
+            chat_name=chat_info.get("name") or chat_id or "Feishu Chat",
+            chat_type=self._resolve_source_chat_type(chat_info=chat_info, event_chat_type="group"),
+            user_id=sender_profile["user_id"],
+            user_name=sender_profile["user_name"],
+            thread_id=None,
+            user_id_alt=sender_profile["user_id_alt"],
+        )
+        synthetic_event = MessageEvent(
+            text=text,
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message=None,
+            message_id=str(uuid.uuid4()),
+            timestamp=datetime.now(),
+        )
+        logger.info("[Feishu] Injecting conflict resolution event: %s", text)
+        await self._handle_message_with_guards(synthetic_event)
 
     async def _resolve_approval(
         self,
@@ -4374,12 +4810,30 @@ class FeishuAdapter(BasePlatformAdapter):
     # =========================================================================
 
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
-        # Feishu post-type 'md' elements do not render markdown tables; sending
-        # table content as post causes the message to appear blank on the client.
-        # Force plain text for anything that looks like a markdown table.
-        if _MARKDOWN_TABLE_RE.search(content):
-            text_payload = {"text": content}
-            return "text", json.dumps(text_payload, ensure_ascii=False)
+        # Markdown tables → column_set interactive card (better table
+        # rendering than card-level `markdown` block).  Code fences or
+        # inline code → Feishu interactive card with schema 2.0 `markdown`
+        # block.
+        _has_table = _has_markdown_table_outside_fence(content)
+        _has_fence = "```" in content
+        _has_inline = _has_inline_code_outside_fence(content)
+        if _has_table:
+            return "interactive", _build_markdown_table_card_payload(content)
+        if _has_fence:
+            card = _build_feishu_card(body_elements=[
+                {"tag": "markdown", "content": content},
+            ])
+            return "interactive", json.dumps(card, ensure_ascii=False)
+        if _has_inline:
+            normalized = _normalize_feishu_card_markdown(content)
+            card = _build_feishu_card(body_elements=[
+                {"tag": "markdown", "content": normalized},
+            ])
+            return "interactive", json.dumps(card, ensure_ascii=False)
+
+        # Only fall through here when there's no structured content at all.
+        # Post rendering is still preferred for pure markdown (bold, links,
+        # lists) because it gives richer formatting than plain text.
         if _MARKDOWN_HINT_RE.search(content):
             return "post", _build_markdown_post_payload(content)
         text_payload = {"text": content}

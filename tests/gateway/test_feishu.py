@@ -2625,22 +2625,21 @@ class TestAdapterBehavior(unittest.TestCase):
             )
 
         self.assertTrue(result.success)
-        self.assertEqual(captured["request"].request_body.msg_type, "post")
+        self.assertEqual(captured["request"].request_body.msg_type, "interactive")
         payload = json.loads(captured["request"].request_body.content)
-        rows = payload["zh_cn"]["content"]
-        self.assertEqual(
-            rows,
-            [
-                [
-                    {
-                        "tag": "md",
-                        "text": "确认已入库 ✓\n文件路径：`/root/.hermes/profiles/agent_cto/cron/jobs.json`\n**解码后的内容：**",
-                    }
-                ],
-                [{"tag": "md", "text": "```json\n{\"cron\": \"list\"}\n```"}],
-                [{"tag": "md", "text": "后续说明仍应保留。"}],
-            ],
-        )
+        # Schema 2.0 cards use body.elements
+        elements = payload["body"]["elements"]
+        self.assertEqual(len(elements), 1)
+        self.assertEqual(elements[0]["tag"], "markdown")
+        content = elements[0]["content"]
+        # Raw backticks preserved (markdown block renders them natively)
+        self.assertIn("`/root/.hermes/profiles/agent_cto/cron/jobs.json`", content)
+        # Bold preserved
+        self.assertIn("**解码后的内容：**", content)
+        # Fenced code block preserved intact
+        self.assertIn("```json", content)
+        self.assertIn('{"cron": "list"}', content)
+        self.assertIn("后续说明仍应保留。", content)
 
     @patch.dict(os.environ, {}, clear=True)
     def test_build_post_payload_keeps_fence_like_code_lines_inside_code_block(self):

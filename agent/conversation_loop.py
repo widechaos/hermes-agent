@@ -361,6 +361,53 @@ def _get_continuation_prompt(is_partial_stub: bool, dropped_tools: Optional[List
         )
 
 
+# ── SessionDB auto-repair helpers ──────────────────────────────────────
+# Used by the FTS5 pre-retrieval block in run_conversation to attempt
+# self-healing when state.db is temporarily corrupted (stale WAL/SHM,
+# interrupted write, etc.).
+
+_SESSIONDB_REPAIRABLE_MARKERS = (
+    "database disk image is malformed",
+    "file is not a database",
+    "database is locked",
+    "locking protocol",
+    "disk I/O error",
+    "unable to open database",
+    "sqlite3.OperationalError",
+    "sqlite3.DatabaseError",
+)
+
+
+def _is_sessiondb_repairable(error_str: str) -> bool:
+    """Check if a SessionDB error is likely repairable by removing WAL/SHM."""
+    lower = error_str.lower()
+    return any(m.lower() in lower for m in _SESSIONDB_REPAIRABLE_MARKERS)
+
+
+def _try_repair_sessiondb() -> bool:
+    """Attempt to repair state.db by removing WAL/SHM files.
+
+    Returns True if repair was attempted (files existed and were removed),
+    False if no repair was needed or repair failed.
+    """
+    import os as _os
+    from hermes_state import DEFAULT_DB_PATH as _DB_PATH
+
+    _repaired = False
+    for _suffix in ("-wal", "-shm"):
+        _p = _os.path.join(str(_DB_PATH.parent), f"{_DB_PATH.name}{_suffix}")
+        if _os.path.exists(_p):
+            try:
+                _os.remove(_p)
+                _repaired = True
+                logger.warning(
+                    "SessionDB auto-repair: removed %s (corrupted WAL/SHM)", _p,
+                )
+            except OSError:
+                pass
+    return _repaired
+
+
 def run_conversation(
     agent,
     user_message: str,
@@ -810,12 +857,69 @@ def run_conversation(
     # Use original_user_message (clean input) — user_message may contain
     # injected skill content that bloats / breaks provider queries.
     _ext_prefetch_cache = ""
+    _query = original_user_message if isinstance(original_user_message, str) else ""
     if agent._memory_manager:
         try:
-            _query = original_user_message if isinstance(original_user_message, str) else ""
             _ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
         except Exception:
             pass
+
+    # --- Session Search (FTS5) pre-retrieval on first turn ---
+    # Complements Honcho's semantic search with keyword-based session recall
+    # from the SQLite FTS5 index. Only runs on the first user turn to avoid
+    # repeated queries. Results are merged into the same <memory-context>
+    # block as Honcho's prefetch, with [FTS5] labels for disambiguation.
+    #
+    # Auto-repair: if SessionDB init fails (corrupted WAL/SHM, DB corruption),
+    # attempt to delete WAL/SHM files and retry once. If that also fails,
+    # silently skip — the agent still works without FTS5 pre-retrieval.
+    if agent._user_turn_count == 1 and "session_search" in agent.valid_tool_names:
+        _fts5_block = ""
+        _fts5_attempts = 0
+        while _fts5_attempts < 2:
+            _fts5_attempts += 1
+            try:
+                from tools.session_search_tool import session_search as _session_search_fn
+                _fts5_raw = _session_search_fn(
+                    query=_query,
+                    limit=3,
+                    sort="newest",
+                    current_session_id=agent.session_id,
+                )
+                if _fts5_raw:
+                    import json as _json
+                    _parsed = _json.loads(_fts5_raw)
+                    _results = _parsed.get("results") if isinstance(_parsed, dict) else None
+                    if _results:
+                        _fts5_lines = ["## 主动召回的相关记忆（来自 Honcho + FTS5）"]
+                        for r in _results:
+                            _title = r.get("title", "")
+                            _snippet = r.get("snippet") or r.get("preview", "")
+                            _when = r.get("when") or r.get("started_at", "")
+                            _line = f"- [FTS5] {_title}" if _title else "- [FTS5]"
+                            if _when:
+                                _line += f" ({_when})"
+                            if _snippet:
+                                _snip = _snippet[:120].replace("\n", " ")
+                                _line += f": {_snip}"
+                            _fts5_lines.append(_line)
+                        _fts5_block = "\n".join(_fts5_lines)
+                break  # Success — exit retry loop
+            except Exception as _fts5_exc:
+                _fts5_err = str(_fts5_exc)
+                # Only attempt repair on first failure, and only for DB-level errors
+                if _fts5_attempts >= 2 or not _is_sessiondb_repairable(_fts5_err):
+                    break
+                # Attempt repair: delete WAL/SHM files, then retry
+                _repaired = _try_repair_sessiondb()
+                if not _repaired:
+                    break
+
+        if _fts5_block:
+            if _ext_prefetch_cache:
+                _ext_prefetch_cache = _fts5_block + "\n\n" + _ext_prefetch_cache
+            else:
+                _ext_prefetch_cache = _fts5_block
 
     # Optional opt-in runtime: if api_mode == codex_app_server, hand the
     # turn to the codex app-server subprocess (terminal/file ops/patching
